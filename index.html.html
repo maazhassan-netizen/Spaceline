@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spaceline — Property &amp; Space Management</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>
+  :root{color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  body{background:#0f172a;color:#f1f5f9;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
+  .glass{background:linear-gradient(160deg,rgba(30,41,59,.65),rgba(15,23,42,.9));border:1px solid #1e293b;backdrop-filter:blur(8px)}
+  .glow-g{box-shadow:0 0 18px rgba(52,211,153,.18);border-color:rgba(52,211,153,.35)}
+  .glow-y{box-shadow:0 0 18px rgba(250,204,21,.14);border-color:rgba(250,204,21,.3)}
+  .pulse-line{animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.45}50%{opacity:1;text-shadow:0 0 10px rgba(56,189,248,.8)}}
+  .spin{animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+  .rise{animation:rise .35s ease both}@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  input,select{color-scheme:dark}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useMemo}=React;
+
+const TYPES={
+  "Hostel":{unit:"Room",cap:"Beds"},
+  "Hotel / Inn":{unit:"Suite",cap:"Occupants"},
+  "Commercial Plaza":{unit:"Shop",cap:"Square Feet"},
+  "Co-working Space":{unit:"Desk",cap:"Seats"}
+};
+const uid=()=>Math.random().toString(36).slice(2,9);
+const money=n=>"$"+Math.round(n).toLocaleString();
+
+/* ---------- date + ledger helpers (all dates are YYYY-MM-DD strings) ---------- */
+const pad=n=>String(n).padStart(2,"0");
+const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const parse=s=>{const [y,m,d]=s.split("-").map(Number);return new Date(y,m-1,d)};
+const ms=s=>{const [y,m,d]=s.split("-").map(Number);return Date.UTC(y,m-1,d)};
+const span=(a,b)=>b<a?0:Math.round((ms(b)-ms(a))/864e5)+1;
+const fmtD=s=>parse(s).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+const TODAY=iso(new Date());
+const addM=(s,k)=>{const d=parse(s),day=d.getDate();const t=new Date(d.getFullYear(),d.getMonth()+k,1);
+  t.setDate(Math.min(day,new Date(t.getFullYear(),t.getMonth()+1,0).getDate()));return iso(t)};
+// rent is charged on each monthly anniversary of the start date, until the end date
+const chargeDates=(t,upTo)=>{const out=[];
+  for(let k=0;k<600;k++){const c=addM(t.start,k);if(c>upTo||(t.end&&c>=t.end))break;out.push(c)}return out};
+const paidTo=(t,d)=>t.payments.filter(x=>x.date<=d).reduce((a,x)=>a+x.amount,0);
+const balance=(t,d)=>Math.max(0,chargeDates(t,d).length*t.rent-paidTo(t,d));
+const prevD=s=>{const d=parse(s);d.setDate(d.getDate()-1);return iso(d)};
+const active=(t,d)=>t.start<=d&&(!t.end||t.end>d);
+const addD=(s,n)=>{const d=parse(s);d.setDate(d.getDate()+n);return iso(d)};
+const ymAdd=(ym,k)=>{const [y,m]=ym.split("-").map(Number);const d=new Date(y,m-1+k,1);return `${d.getFullYear()}-${pad(d.getMonth()+1)}`};
+const mLabel=ym=>{const [y,m]=ym.split("-").map(Number);return new Date(y,m-1,1).toLocaleDateString("en-US",{month:"long",year:"numeric"})};
+const monthsOf=t=>{const last=t.end?t.end.slice(0,7):ymAdd(TODAY.slice(0,7),2);const out=[];let m=t.start.slice(0,7);for(let i=0;i<240&&m<=last;i++){out.push(m);m=ymAdd(m,1)}return out};
+const adv=t=>{t.payments.push({id:uid(),date:TODAY,amount:t.rent,forMonth:ymAdd(TODAY.slice(0,7),1)});return t};
+
+const rangeFor=(mode,off,cf,ct)=>{const n=new Date();
+  if(mode==="custom")return cf<=ct?[cf,ct]:[ct,cf];
+  if(mode==="month"){const a=new Date(n.getFullYear(),n.getMonth()+off,1);return [iso(a),iso(new Date(a.getFullYear(),a.getMonth()+1,0))]}
+  if(mode==="quarter"){const a=new Date(n.getFullYear(),Math.floor(n.getMonth()/3)*3+off*3,1);return [iso(a),iso(new Date(a.getFullYear(),a.getMonth()+3,0))]}
+  const y=n.getFullYear()+off;return [`${y}-01-01`,`${y}-12-31`]};
+
+/* ---------- seed data (relative to today so the demo always looks alive) ---------- */
+const mk=(name,phone,unit,rent,mAgo,paid,part=0,end=null,lag=0)=>{
+  const t={id:uid(),name,phone,unit,rent,start:addM(TODAY,-mAgo),end,payments:[]};
+  const cs=chargeDates(t,TODAY);
+  const pd=c=>{const d=addD(c,lag);return d>TODAY?TODAY:d};
+  cs.slice(0,paid).forEach(c=>t.payments.push({id:uid(),date:pd(c),amount:rent,forMonth:c.slice(0,7)}));
+  if(part&&cs[paid])t.payments.push({id:uid(),date:pd(cs[paid]),amount:part,forMonth:cs[paid].slice(0,7)});
+  return t};
+const SEED=[
+ {id:"p1",name:"Harbor Hostel",location:"Waterfront District",type:"Hostel",
+  units:[{id:"u1",name:"Room 101",cap:4},{id:"u2",name:"Room 102",cap:3},{id:"u3",name:"Room 103",cap:2},{id:"u4",name:"Room 104",cap:4}],
+  tenants:[
+   mk("Ayaan Malik","+92 300 1234567","u1",180,6,7,0,null,35),
+   mk("Sara Khan","+92 301 7654321","u1",180,4,3),
+   mk("Daniel Ortiz","+34 612 345 678","u2",160,8,9),
+   mk("Mei Lin","+65 8123 4567","u2",160,3,3,60),
+   adv(mk("Omar Siddiqui","+92 333 9876543","u2",160,2,3)),
+   mk("Lucas Meyer","+49 1512 3456789","u3",200,5,4),
+   mk("Priya Nair","+91 98765 43210","u3",200,9,6,0,addM(TODAY,-2))]},
+ {id:"p2",name:"Crown Plaza Arcade",location:"Central Business Avenue",type:"Commercial Plaza",
+  units:[{id:"u5",name:"Shop G-1",cap:1},{id:"u6",name:"Shop G-5",cap:1},{id:"u7",name:"Shop F-2",cap:2},{id:"u8",name:"Shop F-3",cap:1}],
+  tenants:[
+   mk("Bright Optics","+92 321 1112233","u5",1800,10,11,0,null,20),
+   mk("Nadia’s Bakery","+92 322 4445566","u6",2200,5,4),
+   mk("Tech Fix Hub","+92 345 7778899","u7",1500,3,3,750)]}
+];
+
+/* ---------- UI atoms ---------- */
+function Bar({pct,color}){
+  return <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+    <div className="h-full rounded-full transition-all duration-700" style={{width:Math.min(100,pct)+"%",background:color,boxShadow:`0 0 12px ${color}`}}/></div>;
+}
+function Metric({label,value,sub,pct,color}){
+  return <div className="glass rounded-3xl p-5 rise">
+    <div className="text-xs uppercase tracking-widest text-slate-400">{label}</div>
+    <div className="mt-2 text-3xl font-semibold tracking-tight" style={{color}}>{value}</div>
+    <div className="mt-4"><Bar pct={pct} color={color}/></div>
+    <div className="mt-2 text-xs text-slate-500">{sub}</div></div>;
+}
+function Modal({title,onClose,children}){
+  return <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm" onClick={onClose}>
+    <div className="glass rounded-3xl p-6 w-full max-w-md rise" onClick={e=>e.stopPropagation()}>
+      <div className="flex justify-between items-center mb-4"><h3 className="text-lg font-semibold">{title}</h3>
+        <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button></div>{children}</div></div>;
+}
+const inputCls="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-2.5 text-sm outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400/50";
+const primary="w-full bg-sky-500 text-slate-950 hover:bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,.35)] rounded-xl px-4 py-2.5 text-sm font-medium disabled:opacity-40";
+const ghost="border border-slate-700 hover:border-sky-400 rounded-xl px-4 py-2.5 text-sm";
+function Field({label,children}){return <label className="block mb-3"><span className="text-xs text-slate-400">{label}</span><div className="mt-1">{children}</div></label>;}
+const Btn=({children,className,...p})=><button {...p} className={"transition "+(className||"rounded-xl px-4 py-2.5 text-sm font-medium bg-sky-500 text-slate-950 hover:bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,.35)]")}>{children}</button>;
+
+function Login({onLogin}){
+  const [email,setEmail]=useState("landlord@spaceline.app");
+  const [pw,setPw]=useState("demo1234");
+  const [err,setErr]=useState("");
+  const go=e=>{e.preventDefault();email.includes("@")&&pw.length>=6?onLogin(email):setErr("Enter a valid email and a password of 6+ characters.")};
+  return <div className="min-h-screen flex items-center justify-center p-4">
+    <form onSubmit={go} className="glass rounded-3xl p-8 w-full max-w-sm rise">
+      <div className="h-10 w-10 rounded-2xl bg-sky-400/20 border border-sky-400/50 flex items-center justify-center mb-5 shadow-[0_0_24px_rgba(56,189,248,.4)]">◈</div>
+      <h1 className="text-2xl font-semibold tracking-tight">Spaceline</h1>
+      <p className="text-sm text-slate-400 mb-6">Manager sign-in · demo credentials prefilled</p>
+      <Field label="Email"><input className={inputCls} value={email} onChange={e=>setEmail(e.target.value)}/></Field>
+      <Field label="Password"><input type="password" className={inputCls} value={pw} onChange={e=>setPw(e.target.value)}/></Field>
+      {err&&<p className="text-xs text-rose-400 mb-3">{err}</p>}
+      <Btn type="submit" className={primary}>Sign in</Btn></form></div>;
+}
+
+function App(){
+  const [user,setUser]=useState(null);
+  return user?<Dashboard user={user} setUser={setUser}/>:<Login onLogin={setUser}/>;
+}
+
+function Dashboard({user,setUser}){
+  const [props,setProps]=useState(SEED);
+  const [sel,setSel]=useState("p1");
+  const [modal,setModal]=useState(null);
+  const [sending,setSending]=useState(null);
+  const [sent,setSent]=useState({});
+  const [mode,setMode]=useState("month");
+  const [off,setOff]=useState(0);
+  const [cf,setCf]=useState(addM(TODAY,-1));
+  const [ct,setCt]=useState(TODAY);
+  const [basis,setBasis]=useState("cash");
+
+  const p=props.find(x=>x.id===sel)||props[0];
+  const L=TYPES[p.type];
+  const upd=fn=>setProps(ps=>ps.map(x=>x.id===p.id?fn(x):x));
+  const updT=(id,fn)=>upd(x=>({...x,tenants:x.tenants.map(t=>t.id===id?fn(t):t)}));
+
+  const [from,to]=rangeFor(mode,off,cf,ct);
+  const dueAsOf=to<TODAY?to:TODAY;                       // dues can't accrue in the future
+  const ref=TODAY<from?from:TODAY>to?to:TODAY;           // snapshot date for the matrix
+  const periodLabel=mode==="month"?parse(from).toLocaleDateString("en-US",{month:"long",year:"numeric"})
+    :mode==="quarter"?`Q${Math.floor(parse(from).getMonth()/3)+1} ${parse(from).getFullYear()}`
+    :mode==="year"?String(parse(from).getFullYear()):`${fmtD(from)} – ${fmtD(to)}`;
+
+  const S=useMemo(()=>{
+    const cap=p.units.reduce((a,u)=>a+u.cap,0);
+    const days=span(from,to);
+    let tDays=0,billed=0,cash=0,cur=0,arr=0,ahead=0,rev=0,due=0;const f0=from.slice(0,7),t0=to.slice(0,7);
+    p.tenants.forEach(t=>{
+      const last=t.end&&t.end<=to?prevD(t.end):to;tDays+=span(t.start>from?t.start:from,last);
+      billed+=chargeDates(t,dueAsOf).filter(c=>c>=from).length*t.rent;
+      t.payments.forEach(x=>{if(x.date>=from&&x.date<=to){cash+=x.amount;if(x.forMonth>=f0&&x.forMonth<=t0)cur+=x.amount;else if(x.forMonth<f0)arr+=x.amount;else ahead+=x.amount}if(x.forMonth>=f0&&x.forMonth<=t0&&x.date<=TODAY)rev+=x.amount});
+      due+=balance(t,dueAsOf);
+    });
+    const now=p.tenants.filter(t=>active(t,ref)).length;
+    return {cap,billed,cash,cur,arr,ahead,rev,due,now,pct:v=>billed?v/billed*100:v>0?100:0,
+      occ:cap&&days?tDays/(cap*days)*100:0,
+      };
+  },[p,from,to,dueAsOf,ref]);
+
+  const unitOf=id=>p.units.find(u=>u.id===id);
+  const main=basis==="cash"?S.cash:S.rev;
+  const ledgerAll=p.tenants.flatMap(t=>t.payments.filter(x=>x.date>=from&&x.date<=to).map(x=>({...x,tenant:t.name}))).sort((a,b)=>b.date.localeCompare(a.date));
+  const ledger=ledgerAll.slice(0,15);
+  const overdue=p.tenants.map(t=>({...t,due:balance(t,dueAsOf)})).filter(t=>t.due>0);
+  const retired=p.tenants.filter(t=>t.end&&t.end<=ref);
+
+  const remind=t=>{
+    const u=unitOf(t.unit);
+    const msg=`Hello ${t.name},\n\nThis is a friendly reminder from ${p.name} that your rent of ${money(t.due)} for ${L.unit} ${u.name.replace(new RegExp("^"+L.unit+"\\s*","i"),"")} is currently due.\n\nKindly arrange payment at your earliest convenience. If you have already paid, please share the receipt and disregard this message.\n\nThank you,\nProperty Management — ${p.name}`;
+    const url="https://wa.me/"+t.phone.replace(/\D/g,"")+"?text="+encodeURIComponent(msg);
+    const w=window.open("about:blank","_blank");
+    setSending(t.id);
+    setTimeout(()=>{if(w)w.location.href=url;else window.open(url,"_blank");setSending(null);setSent(s=>({...s,[t.id]:true}))},1400);
+  };
+
+  const setM=m=>{setMode(m);setOff(0)};
+  const close=()=>setModal(null);
+
+  return <div className="min-h-screen flex flex-col lg:flex-row">
+    <aside className="lg:w-64 lg:min-h-screen border-b lg:border-b-0 lg:border-r border-slate-800 p-4 lg:p-5 flex lg:flex-col gap-3 overflow-x-auto">
+      <div className="hidden lg:flex items-center gap-2 mb-4"><div className="h-8 w-8 rounded-xl bg-sky-400/20 border border-sky-400/50 flex items-center justify-center">◈</div><span className="font-semibold tracking-tight">Spaceline</span></div>
+      <div className="hidden lg:block text-[10px] uppercase tracking-widest text-slate-500 mb-1">Properties</div>
+      {props.map(x=><button key={x.id} onClick={()=>setSel(x.id)}
+        className={"text-left rounded-2xl px-4 py-3 border min-w-[160px] transition "+(x.id===p.id?"border-sky-400/60 bg-sky-400/10 shadow-[0_0_18px_rgba(56,189,248,.18)]":"border-slate-800 hover:border-slate-600")}>
+        <div className="text-sm font-medium">{x.name}</div><div className="text-xs text-slate-500">{x.type}</div></button>)}
+      <Btn onClick={()=>setModal({k:"prop"})} className="border border-dashed border-slate-700 text-slate-300 hover:border-sky-400 rounded-xl px-4 py-2.5 text-sm whitespace-nowrap">+ Add property</Btn>
+      <div className="hidden lg:block mt-auto text-xs text-slate-500"><div className="truncate">{user}</div>
+        <button onClick={()=>setUser(null)} className="text-sky-400 hover:underline mt-1">Sign out</button></div>
+    </aside>
+
+    <main className="flex-1 p-4 sm:p-8 max-w-7xl min-w-0">
+      <header className="flex flex-wrap items-end justify-between gap-3 mb-5">
+        <div><div className="text-xs uppercase tracking-widest text-sky-400">{p.type} · {L.unit}s · {L.cap}</div>
+          <h1 className="text-3xl font-semibold tracking-tight">{p.name}</h1><p className="text-sm text-slate-400">{p.location}</p></div>
+        <div className="flex gap-2"><Btn onClick={()=>setModal({k:"unit"})} className={ghost}>+ Add {L.unit}</Btn>
+          <Btn onClick={()=>setModal({k:"tenant"})}>+ Allocate Tenant</Btn></div>
+      </header>
+
+      {/* Period selector */}
+      <div className="glass rounded-2xl p-3 mb-6 flex flex-wrap items-center gap-3">
+        <div className="flex rounded-xl bg-slate-900 border border-slate-800 p-1">
+          {[["month","Monthly"],["quarter","Quarterly"],["year","Yearly"],["custom","Custom"]].map(([k,l])=>
+            <button key={k} onClick={()=>setM(k)} className={"px-3 py-1.5 text-xs rounded-lg transition "+(mode===k?"bg-sky-500 text-slate-950 font-medium":"text-slate-400 hover:text-white")}>{l}</button>)}
+        </div>
+        {mode==="custom"?<div className="flex items-center gap-2 text-xs text-slate-400">
+            <input type="date" className={inputCls+" !w-auto"} value={cf} onChange={e=>e.target.value&&setCf(e.target.value)}/>to
+            <input type="date" className={inputCls+" !w-auto"} value={ct} onChange={e=>e.target.value&&setCt(e.target.value)}/></div>
+          :<div className="flex items-center gap-2">
+            <button onClick={()=>setOff(off-1)} className="h-8 w-8 rounded-lg border border-slate-700 hover:border-sky-400">‹</button>
+            <span className="text-sm font-medium min-w-[120px] text-center">{periodLabel}</span>
+            <button onClick={()=>setOff(off+1)} className="h-8 w-8 rounded-lg border border-slate-700 hover:border-sky-400">›</button>
+            {off!==0&&<button onClick={()=>setOff(0)} className="text-xs text-sky-400 ml-1">Today</button>}</div>}
+        <div className="flex rounded-xl bg-slate-900 border border-slate-800 p-1" title="Cash = by payment date. Revenue = by the rent month paid for.">
+          {[["cash","Cash collected"],["revenue","Revenue by rent month"]].map(([k,l])=><button key={k} onClick={()=>setBasis(k)} className={"px-3 py-1.5 text-xs rounded-lg transition "+(basis===k?"bg-emerald-400 text-slate-950 font-medium":"text-slate-400 hover:text-white")}>{l}</button>)}</div>
+        <div className="text-xs text-slate-500 ml-auto">{fmtD(from)} → {fmtD(to)}</div>
+      </div>
+
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <Metric label={basis==="cash"?"Cash Collected":"Revenue Earned"} value={money(main)} pct={S.pct(main)} color="#38bdf8"
+          sub={basis==="cash"?`Money received in period · ${money(S.billed)} billed`:`Rent paid for this period’s months · ${S.pct(main).toFixed(0)}% of ${money(S.billed)} billed`}/>
+        <Metric label="Avg Occupancy" value={S.occ.toFixed(0)+"%"} pct={S.occ} color="#34d399"
+          sub={`Across period · ${S.now}/${S.cap} ${L.cap.toLowerCase()} filled on ${fmtD(ref)}`}/>
+        <Metric label="Outstanding Dues" value={money(S.due)} pct={S.due+main?S.due/(S.due+main)*100:0} color="#fb7185"
+          sub={`${overdue.length} account${overdue.length===1?"":"s"} · balance as of ${fmtD(dueAsOf)}`}/>
+      </section>
+
+      <section className="glass rounded-3xl p-5 mb-8">
+        <div className="flex flex-wrap justify-between gap-2 mb-3"><h2 className="text-sm uppercase tracking-widest text-slate-400">Where this period’s cash came from</h2>
+          <span className="text-xs text-slate-500">Revenue for these months: <span className="text-sky-300 font-medium">{money(S.rev)}</span> of {money(S.billed)} billed</span></div>
+        <div className="flex h-3 w-full rounded-full overflow-hidden bg-slate-800">
+          {[[S.cur,"#38bdf8"],[S.arr,"#fbbf24"],[S.ahead,"#a78bfa"]].map(([v,c],i)=><div key={i} style={{width:(S.cash?v/S.cash*100:0)+"%",background:c,boxShadow:`0 0 10px ${c}`}}/>)}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+          <div><div className="text-xs text-sky-300">● For this period’s rent</div><div className="text-lg font-semibold">{money(S.cur)}</div></div>
+          <div><div className="text-xs text-amber-300">● From earlier months (late payments)</div><div className="text-lg font-semibold">{money(S.arr)}</div></div>
+          <div><div className="text-xs text-violet-300">● Paid in advance for later months</div><div className="text-lg font-semibold">{money(S.ahead)}</div></div></div>
+        <p className="text-xs text-slate-500 mt-3">Cash = money received within the dates above. Revenue = rent paid for the period’s months, whenever it was received.</p>
+      </section>
+
+      <section className="mb-10">
+        <div className="flex justify-between items-baseline mb-3"><h2 className="text-sm uppercase tracking-widest text-slate-400">Space Command Matrix</h2>
+          <span className="text-xs text-slate-500">Snapshot · {fmtD(ref)}</span></div>
+        {p.units.length===0&&<p className="text-slate-500 text-sm">No {L.unit.toLowerCase()}s yet — add your first one.</p>}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {p.units.map(u=>{
+            const occ=p.tenants.filter(t=>t.unit===u.id&&active(t,ref));
+            const left=u.cap-occ.length;
+            const [tag,glow]=left<=0?["🟢 Full","glow-g"]:occ.length===0?["⚪ Vacant",""]:["🟡 Partial Empty","glow-y"];
+            return <div key={u.id} className={"glass rounded-3xl p-5 rise "+glow}>
+              <div className="flex justify-between items-start"><div><div className="font-semibold">{u.name}</div>
+                <div className="text-xs text-slate-500">{occ.length}/{u.cap} {L.cap}</div></div>
+                <span className="text-xs rounded-full border border-slate-700 px-2.5 py-1 bg-slate-900/60">{tag}</span></div>
+              <ul className="mt-4 space-y-2">
+                {occ.map(t=>{const d=balance(t,dueAsOf);return <li key={t.id} className="rounded-xl bg-slate-900/70 border border-slate-800 px-3 py-2 text-sm">
+                  <div className="flex justify-between items-center"><span>{t.name}</span>
+                    <span className={"text-xs "+(d>0?"text-rose-400":"text-emerald-400")}>{d>0?money(d)+" due":"Paid up"}</span></div>
+                  <div className="flex justify-between items-center mt-1 text-[11px] text-slate-500">
+                    <span>Since {fmtD(t.start)}{t.end&&<span className="text-amber-300"> · moves out {fmtD(t.end)}</span>}</span>
+                    <button onClick={()=>setModal({k:"retire",t})} className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-400/20">{t.end?"Change move-out":"Retire"}</button></div></li>})}
+                {left>0&&<li className="pulse-line text-xs text-sky-400 rounded-xl border border-dashed border-sky-400/40 px-3 py-2">+ Open Space Available{left>1?` (${left})`:""}</li>}
+              </ul></div>;})}
+        </div>
+      </section>
+
+      <section className="mb-10">
+        <h2 className="text-sm uppercase tracking-widest text-slate-400 mb-3">Current Tenants</h2>
+        <div className="glass rounded-3xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead><tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-800">
+              <th className="p-4">Tenant</th><th className="p-4">{L.unit}</th><th className="p-4">Tenancy</th><th className="p-4 text-right">Rent / mo</th><th className="p-4 text-right">Action</th></tr></thead>
+            <tbody>
+              {p.tenants.filter(t=>active(t,ref)).length===0&&<tr><td colSpan="5" className="p-8 text-center text-slate-500">No current tenants.</td></tr>}
+              {p.tenants.filter(t=>active(t,ref)).map(t=><tr key={t.id} className="border-b border-slate-800/60 last:border-0 hover:bg-slate-800/30">
+                <td className="p-4 font-medium">{t.name}</td>
+                <td className="p-4 text-slate-300">{unitOf(t.unit)?.name}</td>
+                <td className="p-4 text-xs text-slate-400">{fmtD(t.start)} → {t.end?<span className="text-amber-300">moves out {fmtD(t.end)}</span>:"Ongoing"}</td>
+                <td className="p-4 text-right">{money(t.rent)}</td>
+                <td className="p-4 text-right whitespace-nowrap">
+                  <Btn onClick={()=>setModal({k:"pay",t,due:balance(t,TODAY)})} className="rounded-xl border border-slate-700 hover:border-sky-400 px-3 py-2 text-xs mr-2">Record payment</Btn>
+                  <Btn onClick={()=>setModal({k:"retire",t})} className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-300 hover:bg-amber-400/20">{t.end?"Change move-out":"Retire tenant"}</Btn></td></tr>)}
+            </tbody></table></div>
+      </section>
+
+      <section className="mb-10">
+        <h2 className="text-sm uppercase tracking-widest text-slate-400 mb-3">Overdue &amp; WhatsApp Dispatch Center</h2>
+        <div className="glass rounded-3xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[760px]">
+            <thead><tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-800">
+              <th className="p-4">Tenant</th><th className="p-4">{L.unit}</th><th className="p-4">Phone</th><th className="p-4">Tenancy</th><th className="p-4 text-right">Amount Due</th><th className="p-4 text-right">Action</th></tr></thead>
+            <tbody>
+              {overdue.length===0&&<tr><td colSpan="6" className="p-8 text-center text-emerald-400">All rents collected ✨</td></tr>}
+              {overdue.map(t=><tr key={t.id} className="border-b border-slate-800/60 last:border-0 hover:bg-slate-800/30">
+                <td className="p-4 font-medium">{t.name}{t.end&&t.end<=TODAY&&<span className="ml-2 text-[10px] rounded-full border border-amber-400/40 text-amber-300 px-2 py-0.5">Retired</span>}</td>
+                <td className="p-4 text-slate-300">{unitOf(t.unit)?.name}</td>
+                <td className="p-4 text-slate-400">{t.phone}</td>
+                <td className="p-4 text-slate-400 text-xs">{fmtD(t.start)} → {t.end?fmtD(t.end):"Ongoing"}</td>
+                <td className="p-4 text-right text-rose-400 font-semibold" style={{textShadow:"0 0 10px rgba(251,113,133,.5)"}}>{money(t.due)}</td>
+                <td className="p-4 text-right whitespace-nowrap">
+                  <Btn disabled={sending===t.id} onClick={()=>remind(t)} className="bg-emerald-500/15 text-emerald-300 border border-emerald-400/40 hover:bg-emerald-500/25 rounded-xl px-3 py-2 text-xs mr-2 min-w-[130px]">
+                    {sending===t.id?<span className="inline-flex items-center gap-2"><span className="spin inline-block h-3 w-3 rounded-full border-2 border-emerald-300 border-t-transparent"/>Opening…</span>:sent[t.id]?"✓ Sent · Resend":"Send Reminder"}</Btn>
+                  <Btn onClick={()=>setModal({k:"pay",t,due:t.due})} className="text-slate-300 hover:text-white border border-slate-700 rounded-xl px-3 py-2 text-xs">Record payment</Btn></td></tr>)}
+            </tbody></table></div>
+      </section>
+
+      <section className="mb-10">
+        <h2 className="text-sm uppercase tracking-widest text-slate-400 mb-3">Payments Ledger · received in period</h2>
+        <div className="glass rounded-3xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead><tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-800">
+              <th className="p-4">Paid on</th><th className="p-4">Tenant</th><th className="p-4">Rent month</th><th className="p-4">Type</th><th className="p-4 text-right">Amount</th></tr></thead>
+            <tbody>
+              {ledger.length===0&&<tr><td colSpan="5" className="p-8 text-center text-slate-500">No payments received in this period.</td></tr>}
+              {ledger.map(x=>{const dm=x.date.slice(0,7);const [tag,cls]=x.forMonth<dm?["Previous month","text-amber-300 border-amber-400/40"]:x.forMonth>dm?["Advance","text-violet-300 border-violet-400/40"]:["Same month","text-slate-300 border-slate-600"];
+                return <tr key={x.id} className="border-b border-slate-800/60 last:border-0 hover:bg-slate-800/30">
+                  <td className="p-4 text-slate-300">{fmtD(x.date)}</td><td className="p-4 font-medium">{x.tenant}</td><td className="p-4">{mLabel(x.forMonth)}</td>
+                  <td className="p-4"><span className={"text-[11px] rounded-full border px-2 py-0.5 "+cls}>{tag}</span></td>
+                  <td className="p-4 text-right text-emerald-400 font-semibold">{money(x.amount)}</td></tr>})}
+            </tbody></table></div>
+        {ledgerAll.length>ledger.length&&<p className="text-xs text-slate-500 mt-2">Showing the latest {ledger.length} of {ledgerAll.length} payments.</p>}
+      </section>
+
+      {retired.length>0&&<section>
+        <h2 className="text-sm uppercase tracking-widest text-slate-400 mb-3">Retired Tenants</h2>
+        <div className="glass rounded-3xl divide-y divide-slate-800/60">
+          {retired.map(t=>{const d=balance(t,TODAY);return <div key={t.id} className="p-4 flex flex-wrap justify-between gap-2 text-sm">
+            <div><span className="font-medium">{t.name}</span> <span className="text-slate-500">· {unitOf(t.unit)?.name}</span></div>
+            <div className="text-xs text-slate-400">{fmtD(t.start)} → {fmtD(t.end)}</div>
+            <div className={"text-xs "+(d>0?"text-rose-400":"text-emerald-400")}>{d>0?money(d)+" still owed":"Settled"}</div></div>})}
+        </div></section>}
+    </main>
+
+    {modal?.k==="prop"&&<PropModal onClose={close} onSave={np=>{setProps(ps=>[...ps,np]);setSel(np.id);close()}}/>}
+    {modal?.k==="unit"&&<UnitModal L={L} onClose={close} onSave={u=>{upd(x=>({...x,units:[...x.units,u]}));close()}}/>}
+    {modal?.k==="tenant"&&<TenantModal L={L} p={p} onClose={close} onSave={t=>{upd(x=>({...x,tenants:[...x.tenants,t]}));close()}}/>}
+    {modal?.k==="retire"&&<RetireModal t={modal.t} onClose={close} onSave={d=>{updT(modal.t.id,t=>({...t,end:d}));close()}}/>}
+    {modal?.k==="pay"&&<PayModal t={modal.t} due={modal.due} onClose={close} onSave={x=>{updT(modal.t.id,t=>({...t,payments:[...t.payments,{id:uid(),...x}]}));close()}}/>}
+  </div>;
+}
+
+function PropModal({onClose,onSave}){
+  const [f,setF]=useState({name:"",location:"",type:"Hostel"});const L=TYPES[f.type];
+  return <Modal title="Add property" onClose={onClose}>
+    <Field label="Property name"><input className={inputCls} value={f.name} onChange={e=>setF({...f,name:e.target.value})}/></Field>
+    <Field label="Location"><input className={inputCls} value={f.location} onChange={e=>setF({...f,location:e.target.value})}/></Field>
+    <Field label="Property type"><select className={inputCls} value={f.type} onChange={e=>setF({...f,type:e.target.value})}>{Object.keys(TYPES).map(k=><option key={k}>{k}</option>)}</select></Field>
+    <p className="text-xs text-slate-500 mb-4">Labels will read: <span className="text-sky-400">{L.unit}</span> units · capacity in <span className="text-sky-400">{L.cap}</span></p>
+    <Btn disabled={!f.name} onClick={()=>onSave({id:uid(),...f,units:[],tenants:[]})} className={primary}>Create property</Btn></Modal>;
+}
+function UnitModal({L,onClose,onSave}){
+  const [name,setName]=useState("");const [cap,setCap]=useState(1);
+  return <Modal title={`Add ${L.unit}`} onClose={onClose}>
+    <Field label={`${L.unit} name`}><input className={inputCls} placeholder={`e.g. ${L.unit} 201`} value={name} onChange={e=>setName(e.target.value)}/></Field>
+    <Field label={`Capacity limit (${L.cap})`}><input type="number" min="1" className={inputCls} value={cap} onChange={e=>setCap(e.target.value)}/></Field>
+    <Btn disabled={!name} onClick={()=>onSave({id:uid(),name,cap:Math.max(1,+cap||1)})} className={primary}>Add {L.unit}</Btn></Modal>;
+}
+function TenantModal({L,p,onClose,onSave}){
+  const free=p.units.filter(u=>p.tenants.filter(t=>t.unit===u.id&&active(t,TODAY)).length<u.cap);
+  const [f,setF]=useState({name:"",phone:"",unit:free[0]?.id||"",rent:"",start:TODAY});
+  return <Modal title="Allocate tenant" onClose={onClose}>
+    {free.length===0?<p className="text-sm text-amber-300">Every {L.unit.toLowerCase()} is at full capacity. Add a new {L.unit.toLowerCase()} or retire a tenant first.</p>:<>
+    <Field label="Full name"><input className={inputCls} value={f.name} onChange={e=>setF({...f,name:e.target.value})}/></Field>
+    <Field label="WhatsApp phone (with country code)"><input className={inputCls} placeholder="+92 300 0000000" value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/></Field>
+    <Field label={L.unit}><select className={inputCls} value={f.unit} onChange={e=>setF({...f,unit:e.target.value})}>
+      {free.map(u=><option key={u.id} value={u.id}>{u.name} · {u.cap-p.tenants.filter(t=>t.unit===u.id&&active(t,TODAY)).length} open</option>)}</select></Field>
+    <div className="grid grid-cols-2 gap-3">
+      <Field label="Monthly rent ($)"><input type="number" className={inputCls} value={f.rent} onChange={e=>setF({...f,rent:e.target.value})}/></Field>
+      <Field label="Start date"><input type="date" className={inputCls} value={f.start} onChange={e=>setF({...f,start:e.target.value})}/></Field></div>
+    <p className="text-xs text-slate-500 mb-4">Rent is billed on this day each month until the tenant is retired.</p>
+    <Btn disabled={!f.name||!f.phone||!f.rent||!f.start} onClick={()=>onSave({id:uid(),name:f.name,phone:f.phone,unit:f.unit,rent:+f.rent,start:f.start,end:null,payments:[]})} className={primary}>Allocate</Btn></>}</Modal>;
+}
+function RetireModal({t,onClose,onSave}){
+  const [d,setD]=useState(t.end||TODAY);
+  return <Modal title={`Retire ${t.name}`} onClose={onClose}>
+    <p className="text-sm text-slate-400 mb-4">Set the move-out date. The space opens up from this date (pick today to free it immediately), rent stops accruing, and any unpaid balance stays on record.</p>
+    <Field label="Move-out date"><input type="date" min={t.start} className={inputCls} value={d} onChange={e=>setD(e.target.value)}/></Field>
+    <Btn disabled={!d||d<t.start} onClick={()=>onSave(d)} className={primary}>Confirm ending date</Btn></Modal>;
+}
+function PayModal({t,due,onClose,onSave}){
+  const months=monthsOf(t);
+  const rem=ym=>Math.max(0,t.rent-t.payments.filter(x=>x.forMonth===ym).reduce((a,x)=>a+x.amount,0));
+  const firstOpen=months.find(m=>rem(m)>0&&m<=TODAY.slice(0,7))||months.find(m=>m>=TODAY.slice(0,7))||months[months.length-1];
+  const [forMonth,setFor]=useState(firstOpen);
+  const [amount,setAmount]=useState(rem(firstOpen)||t.rent);
+  const [date,setDate]=useState(TODAY);
+  return <Modal title={`Record payment · ${t.name}`} onClose={onClose}>
+    <Field label="Amount received ($)"><input type="number" className={inputCls} value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
+    <Field label="Payment is for (rent month)"><select className={inputCls} value={forMonth} onChange={e=>{setFor(e.target.value);setAmount(rem(e.target.value)||t.rent)}}>
+      {months.map(m=><option key={m} value={m}>{mLabel(m)} — {rem(m)>0?money(rem(m))+(m>TODAY.slice(0,7)?" (advance)":" due"):"paid in full"}</option>)}</select></Field>
+    <Field label="Paid on (date received)"><input type="date" className={inputCls} value={date} onChange={e=>setDate(e.target.value)}/></Field>
+    <p className="text-xs text-slate-500 mb-4">Cash reports use the <b>paid-on</b> date. Revenue reports use the <b>rent month</b>, so a late payment still counts toward the month it settles.</p>
+    <Btn disabled={!(+amount>0)||!date} onClick={()=>onSave({amount:+amount,date,forMonth})} className={primary}>Save payment</Btn></Modal>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
